@@ -258,6 +258,10 @@ resources:
           - create
         description: "EC2 instance metadata HTTP token requirement. `required` enforces IMDSv2; `optional` permits IMDSv1. Defaults to `required` and is immutable after creation."
 
+      - path: spec.maxUnavailable
+        type: string
+        description: "Largest number of nodes in this pool that may be unavailable at the same time while the pool is upgrading, as an absolute node count (for example `2`). It may not exceed `replicas`. Defaults to 0 when unset: no node is taken out of service until its replacement is ready. The Platform API also accepts a percentage, which this provider cannot send yet."
+
       - path: spec.labels
         type: map
       - path: spec.nodePool.config
@@ -293,6 +297,10 @@ resources:
               type: string
               required: true
               description: "Name of the ConfigMap containing serialized tuning configuration."
+      - path: spec.nodePool.platform.aws.imageType
+        type: string
+        immutable: true
+        description: "Operating system image family for the nodes in this pool, either `Linux` (RHCOS, the default when unset) or `Windows`. Windows pools are License Included: the hourly instance cost covers both the Windows Server OS and the Red Hat support subscription. This is baked into every instance the pool launches, so changing it replaces the node pool; add Windows capacity to an existing cluster with a second node pool."
       - path: spec.nodePool.platform.aws.resourceTags
         type: string
       - path: spec.nodePool.platform.aws.securityGroups

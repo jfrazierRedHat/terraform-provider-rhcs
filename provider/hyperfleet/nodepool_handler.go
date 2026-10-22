@@ -19,10 +19,13 @@ package hyperfleet
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	v1alpha1 "github.com/openshift-online/rosa-hyperfleet-api/api/v1alpha1/public"
 	hyperfleet "github.com/openshift-online/rosa-hyperfleet-api/clientset"
@@ -104,6 +107,96 @@ func (h *NodePoolHandlerImpl) PreExpand(ctx context.Context, input *NodePoolStat
 			}
 		}
 	}
+
+	diags.Append(validateMaxUnavailable(input)...)
+	diags.Append(validateImageType(input)...)
+
+	return diags
+}
+
+var maxUnavailableCountRE = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
+
+// validateMaxUnavailable checks that max_unavailable is either null, unknown,
+// or a non-negative integer node count (not a percentage). Percentages are
+// rejected early (the draft accepts "N%" but the provider doesn't send it yet).
+// If a count is given and replicas is known, it must not exceed replicas.
+// Drop this validator once the clientset pathbind handles intstr round-trips.
+func validateMaxUnavailable(input *NodePoolState) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	if input.MaxUnavailable.IsNull() || input.MaxUnavailable.IsUnknown() {
+		return diags
+	}
+
+	value := input.MaxUnavailable.ValueString()
+
+	if strings.HasSuffix(value, "%") {
+		diags.AddAttributeError(
+			path.Root("max_unavailable"),
+			"max_unavailable percentages are not supported yet",
+			fmt.Sprintf(
+				"max_unavailable percentages are not supported yet, got %q; "+
+					"use an absolute number of nodes (for example \"2\")",
+				value,
+			),
+		)
+		return diags
+	}
+
+	if !maxUnavailableCountRE.MatchString(value) {
+		diags.AddAttributeError(
+			path.Root("max_unavailable"),
+			"Invalid max_unavailable",
+			fmt.Sprintf("max_unavailable must be a non-negative whole number of nodes (for example \"2\"), got %q", value),
+		)
+		return diags
+	}
+
+	count, err := strconv.ParseInt(value, 10, 32)
+	if err != nil {
+		diags.AddAttributeError(
+			path.Root("max_unavailable"),
+			"Invalid max_unavailable",
+			fmt.Sprintf("max_unavailable value is too large to be a number of nodes: %v", err),
+		)
+		return diags
+	}
+
+	if !input.Replicas.IsNull() && !input.Replicas.IsUnknown() {
+		replicas := input.Replicas.ValueInt64()
+		if count > replicas {
+			diags.AddAttributeError(
+				path.Root("max_unavailable"),
+				"max_unavailable exceeds replicas",
+				fmt.Sprintf("max_unavailable %d cannot exceed replicas %d", count, replicas),
+			)
+		}
+	}
+
+	return diags
+}
+
+// validateImageType checks the operating system image family against the enum
+// the Platform API accepts on spec.nodePool.platform.aws.imageType, so a bad
+// value fails during apply instead of on the API round trip. The values are
+// case-sensitive, which is the most common way to get this wrong.
+func validateImageType(input *NodePoolState) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	if input.ImageType.IsNull() || input.ImageType.IsUnknown() {
+		return diags
+	}
+
+	switch hypershiftv1beta1.ImageType(input.ImageType.ValueString()) {
+	case hypershiftv1beta1.ImageTypeLinux, hypershiftv1beta1.ImageTypeWindows:
+		return diags
+	}
+
+	diags.AddAttributeError(
+		path.Root("image_type"), "Invalid node pool image_type",
+		fmt.Sprintf("image_type must be %q or %q, got %q",
+			hypershiftv1beta1.ImageTypeLinux, hypershiftv1beta1.ImageTypeWindows, input.ImageType.ValueString()),
+	)
 
 	return diags
 }

@@ -53,9 +53,21 @@ variable "autoscaling" {
   default     = null
 }
 
+variable "max_unavailable" {
+  type        = string
+  description = "Largest number of nodes that may be unavailable during an upgrade, as an absolute count"
+  default     = null
+}
+
 variable "instance_type" {
   type        = string
   description = "EC2 instance type (e.g. m5.xlarge)"
+}
+
+variable "image_type" {
+  type        = string
+  description = "Operating system image family (Linux or Windows)"
+  default     = null
 }
 
 variable "ec2_instance_metadata_http_tokens" {

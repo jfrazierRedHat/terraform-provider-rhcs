@@ -654,5 +654,430 @@ var _ = Describe("rhcs_nodepool_hyperfleet", func() {
 			runOutput = Terraform.Destroy()
 			Expect(runOutput.ExitCode).To(BeZero())
 		})
+
+		Context("Upgrade disruption budget", func() {
+			var hyperfleetServer *Server
+
+			BeforeEach(func() {
+				hyperfleetServer = NewServer()
+			})
+
+			AfterEach(func() {
+				hyperfleetServer.Close()
+			})
+
+			It("sets max_unavailable as an absolute count on create", func() {
+				clusterResponse := `{"metadata": {"uid": "c-123", "name": "test-cluster"}, "spec": {"hostedCluster": {"platform": {"aws": {"rolesRef": {"prefix": "roles-prefix"}}}}}}`
+				createResponse := `{"metadata": {"uid": "np-456", "name": "test-cluster.workers"}, "spec": {"maxUnavailable": "2", "autoRepair": true, "nodePool": {"clusterName": "test-cluster", "replicas": 5, "platform": {"type": "AWS", "aws": {"instanceType": "m5.xlarge", "instanceProfile": "roles-prefix-ROSA-Worker-Role", "subnet": {"id": "subnet-0abc123"}}}}},"status": {"phase": "Ready"}}`
+
+				hyperfleetServer.RouteToHandler(http.MethodGet, "/api/v0/nodepools/test-cluster.workers", CombineHandlers(
+					RespondWith(http.StatusOK, createResponse, http.Header{"Content-Type": []string{"application/json"}}),
+				))
+				hyperfleetServer.AppendHandlers(
+					CombineHandlers(
+						VerifyRequest(http.MethodGet, "/api/v0/clusters/test-cluster"),
+						RespondWith(http.StatusOK, clusterResponse, http.Header{"Content-Type": []string{"application/json"}}),
+					),
+					CombineHandlers(
+						VerifyRequest(http.MethodPost, "/api/v0/nodepools"),
+						VerifyJSONRepresenting(map[string]interface{}{
+							"metadata": map[string]interface{}{"name": "test-cluster.workers"},
+							"spec": map[string]interface{}{
+								"maxUnavailable": "2",
+								"autoRepair":     true,
+								"nodePool": map[string]interface{}{
+									"clusterName": "test-cluster",
+									"replicas":    float64(5),
+									"platform": map[string]interface{}{
+										"aws": map[string]interface{}{
+											"instanceType": "m5.xlarge",
+											"subnet":       map[string]interface{}{"id": "subnet-0abc123"},
+										},
+									},
+								},
+							},
+						}),
+						RespondWith(http.StatusCreated, createResponse, http.Header{"Content-Type": []string{"application/json"}}),
+					),
+					CombineHandlers(
+						VerifyRequest(http.MethodDelete, "/api/v0/nodepools/test-cluster.workers"),
+						RespondWith(http.StatusNoContent, ""),
+					),
+				)
+
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id       = "c-123"
+						cluster_name     = "test-cluster"
+						name             = "test-cluster.workers"
+						replicas         = 5
+						max_unavailable  = "2"
+						auto_repair      = true
+						subnet_id        = "subnet-0abc123"
+						instance_type    = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput := Terraform.Apply()
+				Expect(runOutput.ExitCode).To(BeZero())
+
+				planOutput := Terraform.Run("plan", "-detailed-exitcode")
+				Expect(planOutput.ExitCode).To(BeZero(), "expected no-op plan after create")
+
+				runOutput = Terraform.Destroy()
+				Expect(runOutput.ExitCode).To(BeZero())
+			})
+
+			It("updates max_unavailable in place", func() {
+				clusterResponse := `{"metadata": {"uid": "c-123", "name": "test-cluster"}, "spec": {"hostedCluster": {"platform": {"aws": {"rolesRef": {"prefix": "roles-prefix"}}}}}}`
+				createResponse := `{"metadata": {"uid": "np-456", "name": "test-cluster.workers"}, "spec": {"maxUnavailable": "1", "autoRepair": true, "nodePool": {"clusterName": "test-cluster", "replicas": 5, "platform": {"type": "AWS", "aws": {"instanceType": "m5.xlarge", "instanceProfile": "roles-prefix-ROSA-Worker-Role", "subnet": {"id": "subnet-0abc123"}}}}},"status": {"phase": "Ready"}}`
+				updateResponse := `{"metadata": {"uid": "np-456", "name": "test-cluster.workers"}, "spec": {"maxUnavailable": "2", "autoRepair": true, "nodePool": {"clusterName": "test-cluster", "replicas": 5, "platform": {"type": "AWS", "aws": {"instanceType": "m5.xlarge", "instanceProfile": "roles-prefix-ROSA-Worker-Role", "subnet": {"id": "subnet-0abc123"}}}}},"status": {"phase": "Ready"}}`
+
+				hyperfleetServer.RouteToHandler(http.MethodGet, "/api/v0/nodepools/test-cluster.workers", CombineHandlers(
+					RespondWith(http.StatusOK, createResponse, http.Header{"Content-Type": []string{"application/json"}}),
+				))
+				hyperfleetServer.AppendHandlers(
+					CombineHandlers(VerifyRequest(http.MethodGet, "/api/v0/clusters/test-cluster"), RespondWith(http.StatusOK, clusterResponse)),
+					CombineHandlers(VerifyRequest(http.MethodPost, "/api/v0/nodepools"), RespondWith(http.StatusCreated, createResponse)),
+				)
+
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id       = "c-123"
+						cluster_name     = "test-cluster"
+						name             = "test-cluster.workers"
+						replicas         = 5
+						max_unavailable  = "1"
+						auto_repair      = true
+						subnet_id        = "subnet-0abc123"
+						instance_type    = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput := Terraform.Apply()
+				Expect(runOutput.ExitCode).To(BeZero())
+
+				hyperfleetServer.RouteToHandler(http.MethodGet, "/api/v0/nodepools/test-cluster.workers", CombineHandlers(
+					RespondWith(http.StatusOK, updateResponse, http.Header{"Content-Type": []string{"application/json"}}),
+				))
+				hyperfleetServer.AppendHandlers(
+					CombineHandlers(
+						VerifyRequest(http.MethodPut, "/api/v0/nodepools/test-cluster.workers"),
+						VerifyJSONRepresenting(map[string]interface{}{
+							"metadata": map[string]interface{}{"uid": "np-456", "name": "test-cluster.workers"},
+							"spec": map[string]interface{}{
+								"maxUnavailable": "2",
+								"autoRepair":     true,
+								"nodePool": map[string]interface{}{
+									"clusterName": "test-cluster",
+									"replicas":    float64(5),
+									"platform": map[string]interface{}{
+										"aws": map[string]interface{}{
+											"instanceType":    "m5.xlarge",
+											"instanceProfile": "roles-prefix-ROSA-Worker-Role",
+											"subnet":          map[string]interface{}{"id": "subnet-0abc123"},
+										},
+									},
+								},
+							},
+						}),
+						RespondWith(http.StatusOK, updateResponse, http.Header{"Content-Type": []string{"application/json"}}),
+					),
+					CombineHandlers(VerifyRequest(http.MethodDelete, "/api/v0/nodepools/test-cluster.workers"), RespondWith(http.StatusNoContent, "")),
+				)
+
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id       = "c-123"
+						cluster_name     = "test-cluster"
+						name             = "test-cluster.workers"
+						replicas         = 5
+						max_unavailable  = "2"
+						auto_repair      = true
+						subnet_id        = "subnet-0abc123"
+						instance_type    = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput = Terraform.Apply()
+				Expect(runOutput.ExitCode).To(BeZero())
+
+				runOutput = Terraform.Destroy()
+				Expect(runOutput.ExitCode).To(BeZero())
+			})
+
+			It("rejects non-integer max_unavailable", func() {
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id       = "c-123"
+						cluster_name     = "test-cluster"
+						name             = "test-cluster.workers"
+						replicas         = 5
+						max_unavailable  = "abc"
+						auto_repair      = true
+						subnet_id        = "subnet-0abc123"
+						instance_type    = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput := Terraform.Apply()
+				Expect(runOutput.ExitCode).ToNot(BeZero())
+				runOutput.VerifyErrorContainsSubstring("non-negative whole number")
+			})
+
+			It("rejects percentage max_unavailable with explanation", func() {
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id       = "c-123"
+						cluster_name     = "test-cluster"
+						name             = "test-cluster.workers"
+						replicas         = 5
+						max_unavailable  = "50%%"
+						auto_repair      = true
+						subnet_id        = "subnet-0abc123"
+						instance_type    = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput := Terraform.Apply()
+				Expect(runOutput.ExitCode).ToNot(BeZero())
+				runOutput.VerifyErrorContainsSubstring("percentages are not supported yet")
+			})
+
+			It("rejects max_unavailable exceeding replicas", func() {
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id       = "c-123"
+						cluster_name     = "test-cluster"
+						name             = "test-cluster.workers"
+						replicas         = 5
+						max_unavailable  = "10"
+						auto_repair      = true
+						subnet_id        = "subnet-0abc123"
+						instance_type    = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput := Terraform.Apply()
+				Expect(runOutput.ExitCode).ToNot(BeZero())
+				runOutput.VerifyErrorContainsSubstring("cannot exceed replicas")
+			})
+		})
+
+		Context("Windows License Included image type", func() {
+			var hyperfleetServer *Server
+
+			BeforeEach(func() {
+				hyperfleetServer = NewServer()
+			})
+
+			AfterEach(func() {
+				hyperfleetServer.Close()
+			})
+
+			It("sends imageType: Windows and produces clean re-plan", func() {
+				clusterResponse := `{"metadata": {"uid": "c-123", "name": "test-cluster"}, "spec": {"hostedCluster": {"platform": {"aws": {"rolesRef": {"prefix": "roles-prefix"}}}}}}`
+				createResponse := `{"metadata": {"uid": "np-456", "name": "test-cluster.windows-pool"}, "spec": {"autoRepair": true, "nodePool": {"clusterName": "test-cluster", "replicas": 2, "platform": {"type": "AWS", "aws": {"imageType": "Windows", "instanceType": "m5.xlarge", "instanceProfile": "roles-prefix-ROSA-Worker-Role", "subnet": {"id": "subnet-0abc123"}}}}},"status": {"phase": "Ready"}}`
+
+				hyperfleetServer.RouteToHandler(http.MethodGet, "/api/v0/nodepools/test-cluster.windows-pool", CombineHandlers(
+					RespondWith(http.StatusOK, createResponse, http.Header{"Content-Type": []string{"application/json"}}),
+				))
+				hyperfleetServer.AppendHandlers(
+					CombineHandlers(VerifyRequest(http.MethodGet, "/api/v0/clusters/test-cluster"), RespondWith(http.StatusOK, clusterResponse)),
+					CombineHandlers(
+						VerifyRequest(http.MethodPost, "/api/v0/nodepools"),
+						VerifyJSONRepresenting(map[string]interface{}{
+							"metadata": map[string]interface{}{"name": "test-cluster.windows-pool"},
+							"spec": map[string]interface{}{
+								"autoRepair": true,
+								"nodePool": map[string]interface{}{
+									"clusterName": "test-cluster",
+									"replicas":    float64(2),
+									"platform": map[string]interface{}{
+										"aws": map[string]interface{}{
+											"imageType":    "Windows",
+											"instanceType": "m5.xlarge",
+											"subnet":       map[string]interface{}{"id": "subnet-0abc123"},
+										},
+									},
+								},
+							},
+						}),
+						RespondWith(http.StatusCreated, createResponse),
+					),
+					CombineHandlers(VerifyRequest(http.MethodDelete, "/api/v0/nodepools/test-cluster.windows-pool"), RespondWith(http.StatusNoContent, "")),
+				)
+
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id    = "c-123"
+						cluster_name  = "test-cluster"
+						name          = "test-cluster.windows-pool"
+						replicas      = 2
+						image_type    = "Windows"
+						auto_repair   = true
+						subnet_id     = "subnet-0abc123"
+						instance_type = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput := Terraform.Apply()
+				Expect(runOutput.ExitCode).To(BeZero())
+
+				planOutput := Terraform.Run("plan", "-detailed-exitcode")
+				Expect(planOutput.ExitCode).To(BeZero(), "expected no-op plan after create")
+
+				runOutput = Terraform.Destroy()
+				Expect(runOutput.ExitCode).To(BeZero())
+			})
+
+			It("replaces the pool when image_type changes", func() {
+				clusterResponse := `{"metadata": {"uid": "c-123", "name": "test-cluster"}, "spec": {"hostedCluster": {"platform": {"aws": {"rolesRef": {"prefix": "roles-prefix"}}}}}}`
+				linuxResponse := `{"metadata": {"uid": "np-linux", "name": "test-cluster.pool"}, "spec": {"autoRepair": true, "nodePool": {"clusterName": "test-cluster", "replicas": 2, "platform": {"type": "AWS", "aws": {"imageType": "Linux", "instanceType": "m5.xlarge", "instanceProfile": "roles-prefix-ROSA-Worker-Role", "subnet": {"id": "subnet-0abc123"}}}}},"status": {"phase": "Ready"}}`
+				windowsResponse := `{"metadata": {"uid": "np-windows", "name": "test-cluster.pool"}, "spec": {"autoRepair": true, "nodePool": {"clusterName": "test-cluster", "replicas": 2, "platform": {"type": "AWS", "aws": {"imageType": "Windows", "instanceType": "m5.xlarge", "instanceProfile": "roles-prefix-ROSA-Worker-Role", "subnet": {"id": "subnet-0abc123"}}}}},"status": {"phase": "Ready"}}`
+
+				hyperfleetServer.RouteToHandler(http.MethodGet, "/api/v0/nodepools/test-cluster.pool", CombineHandlers(
+					RespondWith(http.StatusOK, linuxResponse, http.Header{"Content-Type": []string{"application/json"}}),
+				))
+				hyperfleetServer.AppendHandlers(
+					CombineHandlers(VerifyRequest(http.MethodGet, "/api/v0/clusters/test-cluster"), RespondWith(http.StatusOK, clusterResponse)),
+					CombineHandlers(VerifyRequest(http.MethodPost, "/api/v0/nodepools"), RespondWith(http.StatusCreated, linuxResponse)),
+				)
+
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id    = "c-123"
+						cluster_name  = "test-cluster"
+						name          = "test-cluster.pool"
+						replicas      = 2
+						image_type    = "Linux"
+						auto_repair   = true
+						subnet_id     = "subnet-0abc123"
+						instance_type = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput := Terraform.Apply()
+				Expect(runOutput.ExitCode).To(BeZero())
+
+				hyperfleetServer.RouteToHandler(http.MethodGet, "/api/v0/nodepools/test-cluster.pool", CombineHandlers(
+					RespondWith(http.StatusOK, windowsResponse, http.Header{"Content-Type": []string{"application/json"}}),
+				))
+				hyperfleetServer.AppendHandlers(
+					CombineHandlers(VerifyRequest(http.MethodDelete, "/api/v0/nodepools/test-cluster.pool"), RespondWith(http.StatusNoContent, "")),
+					CombineHandlers(VerifyRequest(http.MethodGet, "/api/v0/clusters/test-cluster"), RespondWith(http.StatusOK, clusterResponse)),
+					CombineHandlers(VerifyRequest(http.MethodPost, "/api/v0/nodepools"), RespondWith(http.StatusCreated, windowsResponse)),
+					CombineHandlers(VerifyRequest(http.MethodDelete, "/api/v0/nodepools/test-cluster.pool"), RespondWith(http.StatusNoContent, "")),
+				)
+
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id    = "c-123"
+						cluster_name  = "test-cluster"
+						name          = "test-cluster.pool"
+						replicas      = 2
+						image_type    = "Windows"
+						auto_repair   = true
+						subnet_id     = "subnet-0abc123"
+						instance_type = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput = Terraform.Apply()
+				Expect(runOutput.ExitCode).To(BeZero())
+
+				runOutput = Terraform.Destroy()
+				Expect(runOutput.ExitCode).To(BeZero())
+			})
+
+			It("replaces the pool when image_type is removed", func() {
+				clusterResponse := `{"metadata": {"uid": "c-123", "name": "test-cluster"}, "spec": {"hostedCluster": {"platform": {"aws": {"rolesRef": {"prefix": "roles-prefix"}}}}}}`
+				windowsResponse := `{"metadata": {"uid": "np-windows", "name": "test-cluster.pool"}, "spec": {"autoRepair": true, "nodePool": {"clusterName": "test-cluster", "replicas": 2, "platform": {"type": "AWS", "aws": {"imageType": "Windows", "instanceType": "m5.xlarge", "instanceProfile": "roles-prefix-ROSA-Worker-Role", "subnet": {"id": "subnet-0abc123"}}}}},"status": {"phase": "Ready"}}`
+				linuxResponse := `{"metadata": {"uid": "np-linux", "name": "test-cluster.pool"}, "spec": {"autoRepair": true, "nodePool": {"clusterName": "test-cluster", "replicas": 2, "platform": {"type": "AWS", "aws": {"imageType": "Linux", "instanceType": "m5.xlarge", "instanceProfile": "roles-prefix-ROSA-Worker-Role", "subnet": {"id": "subnet-0abc123"}}}}},"status": {"phase": "Ready"}}`
+
+				hyperfleetServer.RouteToHandler(http.MethodGet, "/api/v0/nodepools/test-cluster.pool", CombineHandlers(
+					RespondWith(http.StatusOK, windowsResponse, http.Header{"Content-Type": []string{"application/json"}}),
+				))
+				hyperfleetServer.AppendHandlers(
+					CombineHandlers(VerifyRequest(http.MethodGet, "/api/v0/clusters/test-cluster"), RespondWith(http.StatusOK, clusterResponse)),
+					CombineHandlers(VerifyRequest(http.MethodPost, "/api/v0/nodepools"), RespondWith(http.StatusCreated, windowsResponse)),
+				)
+
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id    = "c-123"
+						cluster_name  = "test-cluster"
+						name          = "test-cluster.pool"
+						replicas      = 2
+						image_type    = "Windows"
+						auto_repair   = true
+						subnet_id     = "subnet-0abc123"
+						instance_type = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput := Terraform.Apply()
+				Expect(runOutput.ExitCode).To(BeZero())
+
+				hyperfleetServer.RouteToHandler(http.MethodGet, "/api/v0/nodepools/test-cluster.pool", CombineHandlers(
+					RespondWith(http.StatusOK, linuxResponse, http.Header{"Content-Type": []string{"application/json"}}),
+				))
+				hyperfleetServer.AppendHandlers(
+					CombineHandlers(VerifyRequest(http.MethodDelete, "/api/v0/nodepools/test-cluster.pool"), RespondWith(http.StatusNoContent, "")),
+					CombineHandlers(VerifyRequest(http.MethodGet, "/api/v0/clusters/test-cluster"), RespondWith(http.StatusOK, clusterResponse)),
+					CombineHandlers(VerifyRequest(http.MethodPost, "/api/v0/nodepools"), RespondWith(http.StatusCreated, linuxResponse)),
+					CombineHandlers(VerifyRequest(http.MethodDelete, "/api/v0/nodepools/test-cluster.pool"), RespondWith(http.StatusNoContent, "")),
+				)
+
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id    = "c-123"
+						cluster_name  = "test-cluster"
+						name          = "test-cluster.pool"
+						replicas      = 2
+						auto_repair   = true
+						subnet_id     = "subnet-0abc123"
+						instance_type = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput = Terraform.Apply()
+				Expect(runOutput.ExitCode).To(BeZero())
+
+				runOutput = Terraform.Destroy()
+				Expect(runOutput.ExitCode).To(BeZero())
+			})
+
+			It("rejects bad enum value", func() {
+				Terraform.Source(fmt.Sprintf(`
+					provider "rhcs" { hyperfleet_url = "%s"; aws_account_id = "123"; aws_region = "us-east-1" }
+					resource "rhcs_nodepool_hyperfleet" "test" {
+						cluster_id    = "c-123"
+						cluster_name  = "test-cluster"
+						name          = "test-cluster.pool"
+						replicas      = 2
+						image_type    = "windows"
+						auto_repair   = true
+						subnet_id     = "subnet-0abc123"
+						instance_type = "m5.xlarge"
+					}
+				`, hyperfleetServer.URL()))
+
+				runOutput := Terraform.Apply()
+				Expect(runOutput.ExitCode).ToNot(BeZero())
+				runOutput.VerifyErrorContainsSubstring(`must be "Linux" or "Windows"`)
+			})
+		})
 	})
 })
